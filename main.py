@@ -117,7 +117,7 @@ def _component_type_name(component: Any) -> str:
     PLUGIN_NAME,
     "OpenCode",
     "控制群聊中可识别机器人之间的有限交互，避免循环调用。",
-    "0.1.7",
+    "0.2.1",
 )
 class MultiBotControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -560,17 +560,31 @@ class MultiBotControlPlugin(Star):
         self.group_window_times.setdefault(group_id, []).append(now)
         self.no_human_times.setdefault(group_id, []).append(now)
 
+    def _self_platform_nickname(self, event: AstrMessageEvent, self_entry: BotEntry) -> str:
+        self_id = _normalize_id(event.get_self_id())
+        group = getattr(event.message_obj, "group", None)
+        members = getattr(group, "members", None) if group else None
+        if members:
+            for member in members:
+                if _normalize_id(getattr(member, "user_id", "")) == self_id:
+                    nickname = str(getattr(member, "nickname", "") or "").strip()
+                    if nickname:
+                        return nickname
+        return self_entry.display_name
+
     def _bot_prompt(self, event: AstrMessageEvent, peer: BotEntry, self_entry: BotEntry) -> str:
         prompting = self._section("prompting")
         template = str(prompting.get("bot_prompt_template") or "")
         style = str(prompting.get("reply_style_prompt") or "")
         sender_name = (event.get_sender_name() or "").strip() or "未知"
+        self_nickname = self._self_platform_nickname(event, self_entry)
         replacements = {
             "<botname>": peer.display_name,
             "<callname>": peer.effective_call_name,
             "<botid>": peer.qq or "未知",
             "<bottype>": "受控机器人" if peer.kind == "controlled" else "不受控机器人",
             "<selfname>": self_entry.display_name,
+            "<selfnickname>": self_nickname,
             "<sendername>": sender_name,
             "<configname>": peer.name or "未知",
         }
@@ -611,6 +625,9 @@ class MultiBotControlPlugin(Star):
             event.stop_event()
             return
 
+        if not event.is_at_or_wake_command:
+            return
+
         entries = self._effective_entries(group_id)
         self_entry = self._self_entry(event, entries)
         targeted_controlled = self._targeted_controlled_entries(event, entries)
@@ -627,15 +644,6 @@ class MultiBotControlPlugin(Star):
             logger.info(f"外部机器人 {self._bot_log_id(peer)} 发言")
 
         self._clear_activated_handlers(event)
-
-        if bool(self._section("targeting").get("require_explicit_target", True)):
-            targets_self = self._message_targets_entry(event, self_entry) or self._wake_prefix_only_targets_self(event, self_entry)
-            if not targets_self:
-                self._log_controlled_reply_blocked(self_entry, self._state_for(self._session_key(event, peer)), "not explicit target", time.time())
-                event.stop_event()
-                return
-        else:
-            targets_self = True
 
         if targeted_controlled and self_entry.identity not in {entry.identity for entry in targeted_controlled}:
             self._log_controlled_reply_blocked(self_entry, self._state_for(self._session_key(event, peer)), "targeted other controlled bot", time.time())
@@ -703,6 +711,8 @@ class MultiBotControlPlugin(Star):
         req.system_prompt = f"{req.system_prompt}\n\n{prompt}".strip()
 
     def _is_unapproved_bot_llm_request(self, event: AstrMessageEvent) -> bool:
+        if not event.is_at_or_wake_command:
+            return False
         group_id = _normalize_id(event.get_group_id())
         if not group_id:
             return False

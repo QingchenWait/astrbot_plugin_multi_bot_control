@@ -105,7 +105,7 @@
         "description": "启用单机器人会话最大连续轮次限制",
         "type": "bool",
         "default": true,
-        "hint": "在冷却时间内，某一个机器人连续回复其他机器人的轮次。超过则进入冷却期。"
+        "hint": "某一个机器人连续回复其他机器人的轮次。超过轮次则进入冷却期。"
       },
       "max_turns_per_session": {
         "description": "单机器人会话最大连续轮次",
@@ -120,7 +120,7 @@
       "cooldown_seconds": {
         "description": "达到限制后的冷却秒数",
         "type": "int",
-        "default": 120
+        "default": 60
       },
       "bot_request_delay_seconds": {
         "description": "识别到机器人请求后，调用 LLM 前等待的秒数",
@@ -203,8 +203,8 @@
         "type": "text",
         "editor_mode": true,
         "editor_language": "markdown",
-        "hint": "可用通配符：<botname> 配置名称或称呼，<configname> 配置名称，<sendername> 平台发送者昵称，<callname> 配置称呼，<botid> QQ 号，<bottype> 机器人类型，<selfname> 当前受控机器人名称。这些昵称/称呼只用于提示词，不参与身份识别。",
-        "default": "<bot_interaction>\n当前消息来自另一个机器人，不是普通用户。\n对方机器人配置名称：<configname>\n对方机器人平台昵称：<sendername>\n对方机器人显示名称：<botname>\n对方机器人 QQ：<botid>\n你必须称呼对方为：<sendername>。\n当对方询问自己是谁、自己的名字或昵称时，可以根据平台昵称 <sendername> 或称呼 <callname> 回答。\n当前受控机器人名称：<selfname>。\n不要使用普通用户称呼。\n</bot_interaction>"
+        "hint": "可用通配符：\n<sendername> 对方机器人昵称，<botid> 对方机器人 QQ 号，<callname> 对方机器人称呼，<selfnickname> 当前受控机器人 QQ 昵称。这些昵称/称呼只用于提示词，不参与身份识别。",
+        "default": "<bot_interaction>\n当前消息来自另一个机器人，不是普通用户。\n对方机器人平台昵称：<sendername>\n对方机器人显示名称：<callname>\n对方机器人 QQ：<botid>\n你必须称呼对方为：<sendername>。\n当对方询问自己是谁、自己的名字或昵称时，可以根据平台昵称 <sendername> 或称呼 <callname> 回答。\n当前受控机器人名称：<selfnickname>。\n不要使用普通用户称呼。\n</bot_interaction>"
       },
       "reply_style_prompt": {
         "description": "机器人之间回复风格提示词",
@@ -216,7 +216,7 @@
     }
   },
   "multi_controlled": {
-    "description": "多受控机器人共存",
+    "description": "多受控机器人集体排队回复",
     "type": "object",
     "items": {
       "enable_priority_order": {
