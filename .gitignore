@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.venv/
+.python312/
+python-*-amd64.exe
+data/
