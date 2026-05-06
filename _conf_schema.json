@@ -163,17 +163,17 @@
       "without_human_window_seconds": {
         "description": "无人类介入连续机器人对话统计窗口秒数",
         "type": "int",
-        "default": 300
+        "default": 90
       },
       "max_bot_replies_without_human": {
         "description": "无人类介入时最多允许的连续机器人对话数",
         "type": "int",
-        "default": 4
+        "default": 10
       },
       "without_human_cooldown_seconds": {
         "description": "连续机器人会话达到限制后的冷却秒数",
         "type": "int",
-        "default": 300,
+        "default": 90,
         "hint": "在统计窗口内，无人类介入的连续机器人对话超过限制后，同群所有受控机器人对 bot 的继续回复都会在该时间内被阻断。"
       },
       "enable_duplicate_message_limit": {
@@ -204,14 +204,14 @@
         "editor_mode": true,
         "editor_language": "markdown",
         "hint": "可用通配符：<botname> 配置名称或称呼，<configname> 配置名称，<sendername> 平台发送者昵称，<callname> 配置称呼，<botid> QQ 号，<bottype> 机器人类型，<selfname> 当前受控机器人名称。这些昵称/称呼只用于提示词，不参与身份识别。",
-        "default": "<bot_interaction>\n当前消息来自另一个机器人，不是普通用户。\n对方机器人配置名称：<configname>\n对方机器人平台昵称：<sendername>\n对方机器人显示名称：<botname>\n对方机器人 QQ：<botid>\n对方机器人类型：<bottype>\n你必须称呼对方为：<callname>。\n当对方询问自己是谁、自己的名字或昵称时，可以根据配置名称 <configname>、平台昵称 <sendername> 或称呼 <callname> 回答。\n当前受控机器人名称：<selfname>。\n不要使用普通用户称呼，不要把对方当作真实人类用户。\n</bot_interaction>"
+        "default": "<bot_interaction>\n当前消息来自另一个机器人，不是普通用户。\n对方机器人配置名称：<configname>\n对方机器人平台昵称：<sendername>\n对方机器人显示名称：<botname>\n对方机器人 QQ：<botid>\n你必须称呼对方为：<callname>。\n当对方询问自己是谁、自己的名字或昵称时，可以根据配置名称 <configname>、平台昵称 <sendername> 或称呼 <callname> 回答。\n当前受控机器人名称：<selfname>。\n不要使用普通用户称呼。\n</bot_interaction>"
       },
       "reply_style_prompt": {
         "description": "机器人之间回复风格提示词",
         "type": "text",
         "editor_mode": true,
         "editor_language": "markdown",
-        "default": "<bot_reply_style>\n回复尽量短。\n不要主动反问，除非人类用户明确要求讨论。\n不要主动呼叫其他机器人。\n不要 @全体成员。\n不要模拟其他机器人的身份。\n如果对方内容重复、空泛或像自动续聊，应直接结束话题，不要继续引导。\n</bot_reply_style>"
+        "default": "<bot_reply_style>\n不要主动反问，除非人类用户明确要求讨论。\n不要主动呼叫其他机器人。\n不要 @全体成员。\n不要模拟其他机器人的身份。\n</bot_reply_style>"
       }
     }
   },
