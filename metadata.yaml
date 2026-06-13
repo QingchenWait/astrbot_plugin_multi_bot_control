@@ -2,10 +2,9 @@ name: astrbot_plugin_multi_bot_control
 display_name: 群聊多机器人共存交互策略组
 desc: 灵活的 AstrBot 群聊内多机器人共存控制插件，支持多种控制策略，支持自建和外部机器人识别，支持自定义机器人交流提示词。
 short_desc: 限制群聊多机器人循环调用。
-version: v0.2.1
+version: v0.2.2
 author: 青尘工作室
 repo: https://github.com/QingchenWait/astrbot_plugin_multi_bot_control
 astrbot_version: ">=4.5.7"
 support_platforms:
   - aiocqhttp
-  - qq_official

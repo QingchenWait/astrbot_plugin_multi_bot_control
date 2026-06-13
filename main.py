@@ -6,10 +6,11 @@ import json
 import re
 import shlex
 import time
-from math import ceil
+from collections import deque
 from dataclasses import dataclass, field
+from math import ceil
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -29,8 +30,13 @@ except Exception:  # pragma: no cover - fallback for older AstrBot builds
 
 
 PLUGIN_NAME = "astrbot_plugin_multi_bot_control"
+PLUGIN_VERSION = "0.2.2"
 LOCAL_BOTS_FILE = "group_bots.json"
 PRIORITY_FILE = "controlled_priorities.json"
+MAX_GROUP_WINDOWS = 512
+MAX_SESSION_STATES = 2048
+MAX_RECENT_MESSAGES = 32
+PENDING_REPLY_EXTRA = "multi_bot_control_pending_reply"
 
 
 @dataclass
@@ -70,23 +76,9 @@ class BotSessionState:
     turns: int = 0
     cooldown_until: float = 0.0
     last_accepted_at: float = 0.0
-    recent_messages: list[tuple[float, str]] = field(default_factory=list)
-
-
-def _unique_non_empty(values: list[Any]) -> list[str]:
-    ret: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        if value is None:
-            continue
-        text = str(value).strip()
-        if not text:
-            continue
-        key = text.casefold()
-        if key not in seen:
-            seen.add(key)
-            ret.append(text)
-    return ret
+    recent_messages: deque[tuple[float, str]] = field(
+        default_factory=lambda: deque(maxlen=MAX_RECENT_MESSAGES),
+    )
 
 
 def _normalize_id(value: Any) -> str:
@@ -96,6 +88,41 @@ def _normalize_id(value: Any) -> str:
     if text.endswith(".0") and text[:-2].isdigit():
         text = text[:-2]
     return text
+
+
+def _id_candidates(*values: Any) -> tuple[str, ...]:
+    ret: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_id(value)
+        if not normalized:
+            continue
+        key = normalized.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        ret.append(normalized)
+    return tuple(ret)
+
+
+def _candidate_has_match(candidates: Iterable[str], expected: str) -> bool:
+    expected = _normalize_id(expected)
+    if not expected:
+        return False
+    expected_key = expected.casefold()
+    return any(_normalize_id(item).casefold() == expected_key for item in candidates)
+
+
+def _extract_from_mapping(data: Any, path: tuple[str, ...]) -> Any:
+    current = data
+    for key in path:
+        if isinstance(current, dict):
+            current = current.get(key)
+        else:
+            current = getattr(current, key, None)
+        if current is None:
+            return None
+    return current
 
 
 def _stable_message_hash(text: str) -> str:
@@ -117,7 +144,7 @@ def _component_type_name(component: Any) -> str:
     PLUGIN_NAME,
     "OpenCode",
     "控制群聊中可识别机器人之间的有限交互，避免循环调用。",
-    "0.2.1",
+    PLUGIN_VERSION,
 )
 class MultiBotControlPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -127,11 +154,13 @@ class MultiBotControlPlugin(Star):
         self.group_bots_path = self.data_dir / LOCAL_BOTS_FILE
         self.priority_path = self.data_dir / PRIORITY_FILE
         self.sessions: dict[str, BotSessionState] = {}
-        self.group_window_times: dict[str, list[float]] = {}
-        self.no_human_times: dict[str, list[float]] = {}
+        self.group_window_times: dict[str, deque[float]] = {}
+        self.no_human_times: dict[str, deque[float]] = {}
         self.no_human_cooldowns: dict[str, float] = {}
         self._group_bots_cache: dict[str, Any] | None = None
         self._priority_cache: dict[str, int] | None = None
+        self._unmatched_self_warned: set[str] = set()
+        self._unsupported_platform_warned: set[str] = set()
 
     async def initialize(self):
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -270,8 +299,59 @@ class MultiBotControlPlugin(Star):
         for entry in self._global_entries():
             merged[entry.identity] = entry
         for entry in self._local_entries(group_id):
+            existing = merged.get(entry.identity)
+            if existing and existing.kind == "controlled":
+                continue
             merged[entry.identity] = entry
         return list(merged.values())
+
+    def _entry_by_qq(self, entries: list[BotEntry]) -> dict[str, BotEntry]:
+        return {entry.qq.casefold(): entry for entry in entries if entry.qq}
+
+    def _platform_supports_qq_identity(self, event: AstrMessageEvent) -> bool:
+        platform_name = (event.get_platform_name() or "").casefold()
+        if "qq_official" in platform_name:
+            return False
+        return "aiocqhttp" in platform_name or "onebot" in platform_name or "qq" in platform_name
+
+    def _raw_value(self, event: AstrMessageEvent, *paths: tuple[str, ...]) -> tuple[Any, ...]:
+        raw = getattr(event.message_obj, "raw_message", None)
+        return tuple(_extract_from_mapping(raw, path) for path in paths)
+
+    def _sender_id_candidates(self, event: AstrMessageEvent) -> tuple[str, ...]:
+        if not self._platform_supports_qq_identity(event):
+            return ()
+        return _id_candidates(
+            event.get_sender_id(),
+            getattr(getattr(event.message_obj, "sender", None), "user_id", None),
+            *self._raw_value(event, ("user_id",), ("sender", "user_id"), ("author", "user_id")),
+        )
+
+    def _self_id_candidates(self, event: AstrMessageEvent) -> tuple[str, ...]:
+        if not self._platform_supports_qq_identity(event):
+            return ()
+        return _id_candidates(
+            event.get_self_id(),
+            getattr(event.message_obj, "self_id", None),
+            *self._raw_value(event, ("self_id",), ("bot_id",), ("self", "user_id")),
+        )
+
+    def _group_key(self, event: AstrMessageEvent) -> str:
+        group_id = _normalize_id(event.get_group_id())
+        if group_id:
+            return f"{event.get_platform_id()}:{group_id}"
+        return f"{event.get_platform_id()}:nogroup:{_normalize_id(event.get_session_id()) or 'unknown'}"
+
+    def _local_group_id(self, event: AstrMessageEvent) -> str:
+        return _normalize_id(event.get_group_id())
+
+    def _match_entry(self, candidates: Iterable[str], entries: list[BotEntry]) -> BotEntry | None:
+        by_qq = self._entry_by_qq(entries)
+        for candidate in candidates:
+            entry = by_qq.get(candidate.casefold())
+            if entry:
+                return entry
+        return None
 
     def _ensure_controlled_priorities(self) -> None:
         priorities = self._load_priorities()
@@ -341,8 +421,8 @@ class MultiBotControlPlugin(Star):
     ) -> None:
         if self_entry.kind != "controlled" or self_entry.source != "global":
             return
-        group_id = _normalize_id(event.get_group_id()) or "nogroup"
-        remaining = self._remaining_group_block_seconds(group_id, now)
+        group_key = self._group_key(event)
+        remaining = self._remaining_group_block_seconds(group_key, now)
         if remaining <= 0:
             remaining = self._remaining_block_seconds(state, now)
         logger.info(
@@ -350,52 +430,79 @@ class MultiBotControlPlugin(Star):
         )
 
     def _find_peer_bot(self, event: AstrMessageEvent, entries: list[BotEntry]) -> BotEntry | None:
-        sender_id = _normalize_id(event.get_sender_id())
-        if sender_id:
-            for entry in entries:
-                if entry.qq and entry.qq == sender_id:
-                    return entry
-        return None
+        return self._match_entry(self._sender_id_candidates(event), entries)
 
     def _self_entry(self, event: AstrMessageEvent, entries: list[BotEntry]) -> BotEntry:
-        self_id = _normalize_id(event.get_self_id())
-        for entry in entries:
-            if entry.kind == "controlled" and entry.qq and entry.qq == self_id:
-                return entry
+        candidates = self._self_id_candidates(event)
+        controlled = [entry for entry in entries if entry.kind == "controlled"]
+        matched = self._match_entry(candidates, controlled)
+        if matched:
+            return matched
+        self_id = candidates[0] if candidates else _normalize_id(event.get_self_id())
         return BotEntry(qq=self_id, name=self_id, call_name=self_id, kind="controlled", source="runtime")
 
     def _at_targets(self, event: AstrMessageEvent) -> set[str]:
+        if not self._platform_supports_qq_identity(event):
+            return set()
         targets: set[str] = set()
         for component in event.get_messages():
             if isinstance(component, Comp.At) or _component_type_name(component).endswith("at"):
                 qq = _normalize_id(getattr(component, "qq", ""))
                 if qq and qq != "all":
                     targets.add(qq)
+        raw_message = _extract_from_mapping(
+            getattr(event.message_obj, "raw_message", None),
+            ("message",),
+        )
+        if isinstance(raw_message, list):
+            for item in raw_message:
+                if not isinstance(item, dict) or item.get("type") != "at":
+                    continue
+                data = item.get("data") or {}
+                qq = _normalize_id(data.get("qq")) if isinstance(data, dict) else ""
+                if qq and qq != "all":
+                    targets.add(qq)
         return targets
 
     def _has_at_all(self, event: AstrMessageEvent) -> bool:
+        at_all_cls = getattr(Comp, "AtAll", None)
         for component in event.get_messages():
-            if isinstance(component, getattr(Comp, "AtAll", Comp.At)):
+            if at_all_cls is not None and isinstance(component, at_all_cls):
                 return True
             if isinstance(component, Comp.At) and _normalize_id(getattr(component, "qq", "")) == "all":
                 return True
+        raw_message = _extract_from_mapping(
+            getattr(event.message_obj, "raw_message", None),
+            ("message",),
+        )
+        if isinstance(raw_message, list):
+            for item in raw_message:
+                if not isinstance(item, dict) or item.get("type") != "at":
+                    continue
+                data = item.get("data") or {}
+                if isinstance(data, dict) and _normalize_id(data.get("qq")) == "all":
+                    return True
         return False
 
     def _reply_sender_ids(self, event: AstrMessageEvent) -> set[str]:
+        if not self._platform_supports_qq_identity(event):
+            return set()
         sender_ids: set[str] = set()
         for component in event.get_messages():
             if isinstance(component, Comp.Reply) or _component_type_name(component).endswith("reply"):
-                sender_id = _normalize_id(getattr(component, "sender_id", ""))
-                if sender_id:
-                    sender_ids.add(sender_id)
+                for candidate in _id_candidates(
+                    getattr(component, "sender_id", ""),
+                    getattr(component, "qq", ""),
+                ):
+                    sender_ids.add(candidate)
         return sender_ids
 
     def _message_targets_entry(self, event: AstrMessageEvent, entry: BotEntry) -> bool:
         target = self._section("targeting")
         at_targets = self._at_targets(event)
-        if entry.qq and entry.qq in at_targets:
+        if entry.qq and _candidate_has_match(at_targets, entry.qq):
             return True
-        if bool(target.get("enable_reply_target", True)) and entry.qq in self._reply_sender_ids(event):
+        if bool(target.get("enable_reply_target", True)) and _candidate_has_match(self._reply_sender_ids(event), entry.qq):
             return True
         if bool(target.get("treat_at_all_as_target", False)) and self._has_at_all(event):
             return True
@@ -407,7 +514,9 @@ class MultiBotControlPlugin(Star):
             return False
         if self._message_targets_entry(event, self_entry):
             return False
-        return bool(event.is_at_or_wake_command)
+        if self._at_targets(event) or self._reply_sender_ids(event) or self._has_at_all(event):
+            return False
+        return bool(event.is_wake and event.is_at_or_wake_command)
 
     def _targeted_controlled_entries(
         self,
@@ -436,41 +545,66 @@ class MultiBotControlPlugin(Star):
         spacing = self._conf_int("multi_controlled", "controlled_reply_spacing_seconds", 2)
         return float(rank * spacing)
 
-    def _session_key(self, event: AstrMessageEvent, peer: BotEntry) -> str:
+    def _session_key(
+        self,
+        event: AstrMessageEvent,
+        peer: BotEntry,
+        self_entry: BotEntry | None = None,
+    ) -> str:
+        if self_entry:
+            self_identity = self_entry.identity
+        else:
+            candidates = self._self_id_candidates(event)
+            self_identity = f"qq:{candidates[0] if candidates else 'noself'}"
         return ":".join(
             [
-                _normalize_id(event.get_group_id()) or "nogroup",
-                _normalize_id(event.get_self_id()) or "noself",
+                self._group_key(event),
+                self_identity,
                 peer.identity,
             ],
         )
 
     def _state_for(self, key: str) -> BotSessionState:
+        if key not in self.sessions and len(self.sessions) >= MAX_SESSION_STATES:
+            oldest_key = min(
+                self.sessions,
+                key=lambda item: self.sessions[item].last_accepted_at or 0.0,
+            )
+            self.sessions.pop(oldest_key, None)
         if key not in self.sessions:
             self.sessions[key] = BotSessionState()
         return self.sessions[key]
 
-    def _reset_group_turns(self, group_id: str) -> None:
-        group_prefix = f"{group_id}:"
+    def _record_human_activity(self, group_key: str, now: float | None = None) -> None:
+        now = now or time.time()
+        self._group_times(self.no_human_times, group_key).clear()
+        self.no_human_cooldowns[group_key] = 0.0
+        group_prefix = f"{group_key}:"
         for key, state in self.sessions.items():
-            if key.startswith(group_prefix):
+            if key.startswith(group_prefix) and state.cooldown_until <= now:
                 state.turns = 0
                 state.recent_messages.clear()
-        self.no_human_times[group_id] = []
-        self.no_human_cooldowns[group_id] = 0.0
 
-    def _prune_times(self, values: list[float], now: float, window: int) -> list[float]:
+    def _prune_times(self, values: deque[float], now: float, window: int) -> deque[float]:
         if window <= 0:
-            return []
-        return [ts for ts in values if now - ts <= window]
+            values.clear()
+            return values
+        while values and now - values[0] > window:
+            values.popleft()
+        return values
+
+    def _group_times(self, store: dict[str, deque[float]], group_key: str) -> deque[float]:
+        if group_key not in store and len(store) >= MAX_GROUP_WINDOWS:
+            store.pop(next(iter(store)), None)
+        return store.setdefault(group_key, deque())
 
     def _deny_with_cooldown(self, state: BotSessionState, now: float) -> None:
         limits = self._section("limits")
         if bool(limits.get("enable_cooldown_after_limit", True)):
             state.cooldown_until = now + self._limit_int("cooldown_seconds", 300)
 
-    def _deny_without_human_with_cooldown(self, group_id: str, now: float) -> None:
-        self.no_human_cooldowns[group_id] = now + self._limit_int("without_human_cooldown_seconds", 300)
+    def _deny_without_human_with_cooldown(self, group_key: str, now: float) -> None:
+        self.no_human_cooldowns[group_key] = now + self._limit_int("without_human_cooldown_seconds", 300)
 
     def _can_accept_bot_request(
         self,
@@ -500,30 +634,28 @@ class MultiBotControlPlugin(Star):
                 self._deny_with_cooldown(state, now)
                 return False, "session turn limit"
 
-        group_id = _normalize_id(event.get_group_id()) or "nogroup"
+        group_key = self._group_key(event)
         if bool(limits.get("enable_without_human_limit", True)):
-            cooldown_until = self.no_human_cooldowns.get(group_id, 0.0)
+            cooldown_until = self.no_human_cooldowns.get(group_key, 0.0)
             if cooldown_until and cooldown_until <= now:
-                self.no_human_cooldowns[group_id] = 0.0
-                self.no_human_times[group_id] = []
+                self.no_human_cooldowns[group_key] = 0.0
+                self._group_times(self.no_human_times, group_key).clear()
             elif cooldown_until > now:
                 return False, "without human cooldown"
 
         if bool(limits.get("enable_group_window_limit", True)):
             window = self._limit_int("group_window_seconds", 300, minimum=1)
             max_group = self._limit_int("max_bot_replies_per_group_window", 6, minimum=1)
-            times = self._prune_times(self.group_window_times.get(group_id, []), now, window)
-            self.group_window_times[group_id] = times
+            times = self._prune_times(self._group_times(self.group_window_times, group_key), now, window)
             if len(times) >= max_group:
                 return False, "group window limit"
 
         if bool(limits.get("enable_without_human_limit", True)):
             window = self._limit_int("without_human_window_seconds", 300, minimum=1)
             max_without_human = self._limit_int("max_bot_replies_without_human", 4, minimum=1)
-            times = self._prune_times(self.no_human_times.get(group_id, []), now, window)
-            self.no_human_times[group_id] = times
+            times = self._prune_times(self._group_times(self.no_human_times, group_key), now, window)
             if len(times) >= max_without_human:
-                self._deny_without_human_with_cooldown(group_id, now)
+                self._deny_without_human_with_cooldown(group_key, now)
                 return False, "without human limit"
 
         if bool(limits.get("enable_duplicate_message_limit", True)):
@@ -539,26 +671,50 @@ class MultiBotControlPlugin(Star):
 
     def _prune_recent_messages(
         self,
-        values: list[tuple[float, str]],
+        values: deque[tuple[float, str]],
         now: float,
         window: int,
-    ) -> list[tuple[float, str]]:
+    ) -> deque[tuple[float, str]]:
         if window <= 0:
-            return []
-        return [(ts, msg_hash) for ts, msg_hash in values if now - ts <= window]
+            values.clear()
+            return values
+        while values and now - values[0][0] > window:
+            values.popleft()
+        return values
 
-    def _record_bot_request(
+    def _pending_bot_reply(
         self,
         event: AstrMessageEvent,
-        state: BotSessionState,
-        now: float,
+        peer: BotEntry,
+        self_entry: BotEntry,
+        session_key: str,
+        message_hash: str,
     ) -> None:
-        group_id = _normalize_id(event.get_group_id()) or "nogroup"
+        event.set_extra(
+            PENDING_REPLY_EXTRA,
+            {
+                "session_key": session_key,
+                "group_key": self._group_key(event),
+                "peer": peer.to_json(),
+                "self_entry": self_entry.to_json(),
+                "message_hash": message_hash,
+            },
+        )
+
+    def _commit_bot_reply(
+        self,
+        session_key: str,
+        group_key: str,
+        message_hash: str,
+        now: float,
+    ) -> BotSessionState:
+        state = self._state_for(session_key)
         state.turns += 1
         state.last_accepted_at = now
-        state.recent_messages.append((now, _stable_message_hash(event.message_str)))
-        self.group_window_times.setdefault(group_id, []).append(now)
-        self.no_human_times.setdefault(group_id, []).append(now)
+        state.recent_messages.append((now, message_hash))
+        self._group_times(self.group_window_times, group_key).append(now)
+        self._group_times(self.no_human_times, group_key).append(now)
+        return state
 
     def _self_platform_nickname(self, event: AstrMessageEvent, self_entry: BotEntry) -> str:
         self_id = _normalize_id(event.get_self_id())
@@ -615,26 +771,45 @@ class MultiBotControlPlugin(Star):
         if not self._enabled():
             return
 
-        group_id = _normalize_id(event.get_group_id())
+        group_id = self._local_group_id(event)
         if not group_id:
             return
 
-        sender_id = _normalize_id(event.get_sender_id())
-        self_id = _normalize_id(event.get_self_id())
-        if sender_id and self_id and sender_id == self_id:
+        group_key = self._group_key(event)
+        entries = self._effective_entries(group_id)
+        if not self._platform_supports_qq_identity(event):
+            if group_key not in self._unsupported_platform_warned:
+                logger.warning(
+                    f"{PLUGIN_NAME}: 当前平台无法按 QQ 号识别机器人身份，已跳过多机器人控制。"
+                    "请使用 OneBot v11/aiocqhttp，或确认平台事件能提供真实 QQ 号。",
+                )
+                self._unsupported_platform_warned.add(group_key)
+            return
+
+        sender_candidates = self._sender_id_candidates(event)
+        self_candidates = self._self_id_candidates(event)
+        if sender_candidates and any(
+            _candidate_has_match(self_candidates, sender_id)
+            for sender_id in sender_candidates
+        ):
             event.stop_event()
             return
 
-        if not event.is_at_or_wake_command:
+        self_entry = self._self_entry(event, entries)
+        if self_entry.source != "global":
+            if group_key not in self._unmatched_self_warned:
+                logger.warning(
+                    f"{PLUGIN_NAME}: 当前实例 QQ 未命中“受控机器人”名单，已跳过多机器人控制。"
+                    "请在 WebUI 的“由本 AstrBot 创建的受控机器人”中填写当前机器人 QQ 号。",
+                )
+                self._unmatched_self_warned.add(group_key)
             return
 
-        entries = self._effective_entries(group_id)
-        self_entry = self._self_entry(event, entries)
         targeted_controlled = self._targeted_controlled_entries(event, entries)
 
         peer = self._find_peer_bot(event, entries)
         if not peer:
-            self._reset_group_turns(group_id)
+            self._record_human_activity(group_key)
             if event.is_at_or_wake_command and len(targeted_controlled) > 1:
                 rank_delay = self._self_rank_delay(self_entry, targeted_controlled)
                 await self._delay_before_llm(0.0, rank_delay)
@@ -645,13 +820,28 @@ class MultiBotControlPlugin(Star):
 
         self._clear_activated_handlers(event)
 
+        targets_self = self._message_targets_entry(event, self_entry)
+        if not targets_self and self._wake_prefix_only_targets_self(event, self_entry):
+            targets_self = True
+        require_explicit_target = self._conf_bool("targeting", "require_explicit_target", False)
+
+        if require_explicit_target and not targets_self:
+            self._log_controlled_reply_blocked(
+                self_entry,
+                self._state_for(self._session_key(event, peer, self_entry)),
+                "missing explicit target",
+                time.time(),
+            )
+            event.stop_event()
+            return
+
         if targeted_controlled and self_entry.identity not in {entry.identity for entry in targeted_controlled}:
-            self._log_controlled_reply_blocked(self_entry, self._state_for(self._session_key(event, peer)), "targeted other controlled bot", time.time())
+            self._log_controlled_reply_blocked(self_entry, self._state_for(self._session_key(event, peer, self_entry)), "targeted other controlled bot", time.time())
             event.stop_event()
             return
 
         now = time.time()
-        session_key = self._session_key(event, peer)
+        session_key = self._session_key(event, peer, self_entry)
         state = self._state_for(session_key)
         ok, reason = self._can_accept_bot_request(event, peer, state, now)
         if not ok:
@@ -660,13 +850,14 @@ class MultiBotControlPlugin(Star):
             event.stop_event()
             return
 
-        self._record_bot_request(event, state, now)
-        if self_entry.kind == "controlled" and self_entry.source == "global":
-            remaining_turns = self._remaining_session_turns(state)
-            logger.info(
-                f"受控机器人 {self._bot_log_id(self_entry)} 回复了 bot 的发言，剩余回复轮次：{remaining_turns}",
-            )
         self._set_bot_context_extra(event, peer, self_entry, session_key)
+        self._pending_bot_reply(
+            event,
+            peer,
+            self_entry,
+            session_key,
+            _stable_message_hash(event.message_str),
+        )
         event.is_wake = True
         event.is_at_or_wake_command = True
 
@@ -681,6 +872,34 @@ class MultiBotControlPlugin(Star):
         else:
             event.set_extra("activated_handlers", [])
         event.set_extra("handlers_parsed_params", {})
+
+    @filter.after_message_sent(priority=100)
+    async def commit_bot_reply_after_sent(self, event: AstrMessageEvent):
+        """Only count a bot turn after AstrBot has actually sent a reply."""
+        if not self._enabled():
+            return
+        pending = event.get_extra(PENDING_REPLY_EXTRA)
+        if not isinstance(pending, dict):
+            return
+
+        if not bool(getattr(event, "_has_send_oper", False)):
+            return
+
+        event.set_extra(PENDING_REPLY_EXTRA, None)
+        session_key = str(pending.get("session_key") or "")
+        group_key = str(pending.get("group_key") or "")
+        message_hash = str(pending.get("message_hash") or "")
+        if not session_key or not group_key or not message_hash:
+            return
+
+        state = self._commit_bot_reply(session_key, group_key, message_hash, time.time())
+        raw_self_entry = pending.get("self_entry") or {}
+        self_entry = self._normalize_bot_entry(raw_self_entry, "controlled", "global")
+        if self_entry and self_entry.kind == "controlled" and self_entry.source == "global":
+            remaining_turns = self._remaining_session_turns(state)
+            logger.info(
+                f"受控机器人 {self._bot_log_id(self_entry)} 已实际发出 bot 回复，剩余回复轮次：{remaining_turns}",
+            )
 
     @filter.on_llm_request(priority=100)
     async def inject_bot_prompt(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -711,18 +930,25 @@ class MultiBotControlPlugin(Star):
         req.system_prompt = f"{req.system_prompt}\n\n{prompt}".strip()
 
     def _is_unapproved_bot_llm_request(self, event: AstrMessageEvent) -> bool:
-        if not event.is_at_or_wake_command:
-            return False
         group_id = _normalize_id(event.get_group_id())
         if not group_id:
             return False
         entries = self._effective_entries(group_id)
+        self_entry = self._self_entry(event, entries)
+        if self_entry.source != "global":
+            return False
         peer = self._find_peer_bot(event, entries)
         if not peer:
             return False
-        sender_id = _normalize_id(event.get_sender_id())
-        self_id = _normalize_id(event.get_self_id())
-        return bool(sender_id and sender_id != self_id)
+        sender_candidates = self._sender_id_candidates(event)
+        self_candidates = self._self_id_candidates(event)
+        return bool(
+            sender_candidates
+            and not any(
+                _candidate_has_match(self_candidates, sender_id)
+                for sender_id in sender_candidates
+            )
+        )
 
     @filter.command_group("mbot", alias={"多机器人", "botctl"})
     def mbot(self):

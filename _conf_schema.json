@@ -13,7 +13,7 @@
         "description": "由本 AstrBot 创建的受控机器人",
         "type": "list",
         "default": [],
-        "hint": "可通过这个 AstrBot 程序调用的机器人。机器人识别仅支持 QQ 号精确匹配。",
+        "hint": "填写当前 AstrBot 实例能够控制、会主动调用 LLM 回复的机器人 QQ 号。当前识别以 QQ 号精确匹配为准，推荐使用 OneBot v11/aiocqhttp；QQ 官方 API 只提供 openid 时无法用 QQ 号匹配。",
         "items": {
           "qq": {
             "description": "QQ 号",
@@ -41,7 +41,7 @@
         "description": "来源未知的不受控机器人",
         "type": "list",
         "default": [],
-        "hint": "这些机器人只会被识别和限流。机器人识别仅支持 QQ 号精确匹配。",
+        "hint": "填写同群中不能被本 AstrBot 控制、但需要被识别和限流的外部机器人 QQ 号。名单是全局名单，可在多个群聊中复用；统计与冷却会按群聊隔离。",
         "items": {
           "qq": {
             "description": "QQ 号",
@@ -75,13 +75,13 @@
         "description": "机器人消息必须明确指向当前机器人",
         "type": "bool",
         "default": false,
-        "hint": "如果关闭，任何被识别为机器人的消息都会被处理，适合单机器人环境；如果开启，只有明确指向当前机器人的消息才会被处理，适合多机器人环境。"
+        "hint": "开启后，名单内机器人只有 @ 当前受控机器人、引用回复当前受控机器人，或符合下面目标规则时才会触发回复；未明确指向当前机器人的机器人消息会被静默拦截。"
       },
       "enable_reply_target": {
         "description": "允许通过引用回复当前机器人识别目标",
         "type": "bool",
         "default": true,
-        "hint": "如果开启，回复当前机器人消息的内容会被识别为指向当前机器人的请求，适合多机器人环境；如果关闭，只有消息文本中明确指向当前机器人的内容才会被识别，适合单机器人环境。"
+        "hint": "开启后，机器人引用回复当前受控机器人的消息会被视为指向当前受控机器人。"
       },
       "treat_at_all_as_target": {
         "description": "将 @全体成员 视为指向当前机器人",
@@ -102,13 +102,13 @@
     "type": "object",
     "items": {
       "enable_max_turns_per_session": {
-        "description": "启用单机器人会话最大连续轮次限制",
+        "description": "启用单对机器人会话最大连续轮次限制",
         "type": "bool",
         "default": true,
-        "hint": "某一个机器人连续回复其他机器人的轮次。超过轮次则进入冷却期。"
+        "hint": "统计维度为：平台实例 + 群聊 + 当前受控机器人 + 对端机器人。不同群聊互不影响。"
       },
       "max_turns_per_session": {
-        "description": "单机器人会话最大连续轮次",
+        "description": "单对机器人会话最大连续轮次",
         "type": "int",
         "default": 2
       },
@@ -142,7 +142,7 @@
         "description": "启用群级时间窗口限制",
         "type": "bool",
         "default": true,
-        "hint": "在冷却时间内，同一群内所有名单内机器人对话的总量。超过则进入冷却期。"
+        "hint": "统计同一平台实例、同一群聊内所有名单机器人触发的回复数量，不会跨群共享。"
       },
       "group_window_seconds": {
         "description": "群级时间窗口秒数",
@@ -158,7 +158,7 @@
         "description": "启用无人类介入时的连续机器人对话限制",
         "type": "bool",
         "default": true,
-        "hint": "在用户设置的时间窗口内，如果机器人对话中没有任何人类用户参与，统计连续机器人对话轮次。超过则进入冷却期并阻断同群所有受控机器人的继续对话。"
+        "hint": "人类消息会重置当前群的无人类统计；不同群聊独立统计。"
       },
       "without_human_window_seconds": {
         "description": "无人类介入连续机器人对话统计窗口秒数",
@@ -174,13 +174,13 @@
         "description": "连续机器人会话达到限制后的冷却秒数",
         "type": "int",
         "default": 90,
-        "hint": "在统计窗口内，无人类介入的连续机器人对话超过限制后，同群所有受控机器人对 bot 的继续回复都会在该时间内被阻断。"
+        "hint": "在统计窗口内，无人类介入的连续机器人对话超过限制后，当前群所有受控机器人对 bot 的继续回复都会在该时间内被阻断。"
       },
       "enable_duplicate_message_limit": {
         "description": "启用重复消息限制",
         "type": "bool",
         "default": true,
-        "hint": "在时间窗口内，同一机器人会话中相同消息的出现次数。超过则进入冷却期。"
+        "hint": "在同一对机器人会话中检查重复消息。"
       },
       "duplicate_window_seconds": {
         "description": "重复消息检查窗口秒数",
@@ -203,7 +203,7 @@
         "type": "text",
         "editor_mode": true,
         "editor_language": "markdown",
-        "hint": "可用通配符：\n<sendername> 对方机器人昵称，<botid> 对方机器人 QQ 号，<callname> 对方机器人称呼，<selfnickname> 当前受控机器人 QQ 昵称。这些昵称/称呼只用于提示词，不参与身份识别。",
+        "hint": "可用通配符：<sendername> 对方机器人昵称，<botid> 对方机器人 QQ 号，<callname> 对方机器人称呼，<selfnickname> 当前受控机器人平台昵称。昵称/称呼只用于提示词，不参与身份识别。",
         "default": "<bot_interaction>\n当前消息来自另一个机器人，不是普通用户。\n对方机器人平台昵称：<sendername>\n对方机器人显示名称：<callname>\n对方机器人 QQ：<botid>\n你必须称呼对方为：<sendername>。\n当对方询问自己是谁、自己的名字或昵称时，可以根据平台昵称 <sendername> 或称呼 <callname> 回答。\n当前受控机器人名称：<selfnickname>。\n不要使用普通用户称呼。\n</bot_interaction>"
       },
       "reply_style_prompt": {
@@ -220,7 +220,7 @@
     "type": "object",
     "items": {
       "enable_priority_order": {
-        "description": "同时指向多个受控机器人时按随机优先级依次回复",
+        "description": "同时指向多个受控机器人时按稳定优先级依次回复",
         "type": "bool",
         "default": true
       },
