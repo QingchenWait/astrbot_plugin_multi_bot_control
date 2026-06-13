@@ -207,13 +207,14 @@ class FakeEvent:
         platform_name="aiocqhttp",
         platform_id="aiocqhttp-main",
         message_str="hello",
+        is_woken=True,
     ):
         self.message_str = message_str
         self.message_obj = MessageObj(group_id, self_id, sender_id, messages or [], raw_message)
         self.platform_name = platform_name
         self.platform_id = platform_id
-        self.is_at_or_wake_command = True
-        self.is_wake = True
+        self.is_at_or_wake_command = is_woken
+        self.is_wake = is_woken
         self.stopped = False
         self.extras = {}
         self._has_send_oper = False
@@ -317,6 +318,22 @@ class MultiBotControlCoreTests(unittest.TestCase):
 
         self.assertIsNone(event.get_extra(main.PENDING_REPLY_EXTRA))
         self.assertEqual(state.turns, 1)
+
+    def test_unwoken_bot_message_is_not_forced_awake(self):
+        plugin = make_plugin()
+        event = FakeEvent(
+            messages=[main.Comp.Plain("not for this bot")],
+            is_woken=False,
+        )
+
+        asyncio.run(plugin.route_group_messages(event))
+
+        self.assertFalse(event.stopped)
+        self.assertFalse(event.is_wake)
+        self.assertFalse(event.is_at_or_wake_command)
+        self.assertIsNone(event.get_extra("multi_bot_control_prompt"))
+        self.assertIsNone(event.get_extra(main.PENDING_REPLY_EXTRA))
+        self.assertEqual(plugin.sessions, {})
 
     def test_failed_send_does_not_commit_pending_reply(self):
         plugin = make_plugin()

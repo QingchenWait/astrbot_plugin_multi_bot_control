@@ -125,6 +125,7 @@ data/plugin_data/astrbot_plugin_multi_bot_control/
 - `_reply_sender_ids(event)`：提取引用回复来源 QQ。
 - `_message_targets_entry(event, entry)`：判断消息是否明确指向某个机器人。
 - `_wake_prefix_only_targets_self(event, self_entry)`：按配置把唤醒前缀视为指向当前机器人。
+- `_event_was_woken(event)`：判断 AstrBot 原始唤醒流程是否已经唤醒该事件。插件不会把未唤醒事件强制唤醒。
 - `_targeted_controlled_entries(event, entries)`：列出被明确指向的受控机器人。
 - `_self_rank_delay(self_entry, targeted_controlled)`：多受控机器人排队延迟。
 
@@ -163,11 +164,12 @@ data/plugin_data/astrbot_plugin_multi_bot_control/
 4. 忽略当前机器人自己发出的消息。
 5. 不支持 QQ 号身份的平台直接跳过。
 6. 识别消息来源是否为名单内机器人；不是则记录人类活动。
-7. 识别消息是否指向当前受控机器人或其他受控机器人。
-8. 执行轮次、冷却、窗口、无人类、重复消息限制。
-9. 放行时注入提示词、写入挂起回复标记，并设置 `event.is_wake` / `event.is_at_or_wake_command`。
-10. 按基础延迟和多受控机器人优先级延迟调用后续 LLM。
-11. 发送阶段完成后由 `after_message_sent` 钩子提交统计；如果没有实际成功发送回复，挂起标记不会转化为轮次。
+7. 如果消息来源是名单内机器人，但 AstrBot 原始唤醒规则没有唤醒当前事件，则直接返回，不注入提示词、不写挂起标记、不改唤醒标志。
+8. 识别消息是否指向当前受控机器人或其他受控机器人。
+9. 执行轮次、冷却、窗口、无人类、重复消息限制。
+10. 放行时注入提示词、写入挂起回复标记，但不修改 `event.is_wake` / `event.is_at_or_wake_command`。
+11. 按基础延迟和多受控机器人优先级延迟调用后续 LLM。
+12. 发送阶段完成后由 `after_message_sent` 钩子提交统计；如果没有实际成功发送回复，挂起标记不会转化为轮次。
 
 ### `/mbot` 命令
 

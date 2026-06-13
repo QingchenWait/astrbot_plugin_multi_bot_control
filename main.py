@@ -518,6 +518,9 @@ class MultiBotControlPlugin(Star):
             return False
         return bool(event.is_wake and event.is_at_or_wake_command)
 
+    def _event_was_woken(self, event: AstrMessageEvent) -> bool:
+        return bool(getattr(event, "is_at_or_wake_command", False))
+
     def _targeted_controlled_entries(
         self,
         event: AstrMessageEvent,
@@ -815,6 +818,9 @@ class MultiBotControlPlugin(Star):
                 await self._delay_before_llm(0.0, rank_delay)
             return
 
+        if not self._event_was_woken(event):
+            return
+
         if peer.kind == "uncontrolled" and peer.source == "global":
             logger.info(f"外部机器人 {self._bot_log_id(peer)} 发言")
 
@@ -858,8 +864,6 @@ class MultiBotControlPlugin(Star):
             session_key,
             _stable_message_hash(event.message_str),
         )
-        event.is_wake = True
-        event.is_at_or_wake_command = True
 
         base_delay = float(self._limit_int("bot_request_delay_seconds", 2))
         rank_delay = self._self_rank_delay(self_entry, targeted_controlled)
@@ -930,6 +934,8 @@ class MultiBotControlPlugin(Star):
         req.system_prompt = f"{req.system_prompt}\n\n{prompt}".strip()
 
     def _is_unapproved_bot_llm_request(self, event: AstrMessageEvent) -> bool:
+        if not self._event_was_woken(event):
+            return False
         group_id = _normalize_id(event.get_group_id())
         if not group_id:
             return False
